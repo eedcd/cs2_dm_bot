@@ -171,6 +171,14 @@ namespace
         bool hasLower = false;
         float lowerZ = kNoLowerLevel;
         std::vector<std::uint8_t> walkableLower;
+        // Full-resolution obstacle masks (1 = blocked). Radar art only paints
+        // walkable floor, so every transparent pixel is solid geometry. Using
+        // the source resolution keeps thin walls that a 512-cell downsample
+        // would drop entirely.
+        std::vector<std::uint8_t> solid;
+        std::vector<std::uint8_t> solidLower;
+        UINT lowerWidth = 0;
+        UINT lowerHeight = 0;
     };
 
     LoadedMap g_map;
@@ -238,6 +246,25 @@ namespace
             count += cell ? 1 : 0;
         }
         return count > 0;
+    }
+
+    void buildSolid(
+        const std::vector<std::uint8_t>& pixels,
+        const UINT width,
+        const UINT height,
+        std::vector<std::uint8_t>& solid)
+    {
+        solid.assign(static_cast<std::size_t>(width) * height, 0);
+        for (UINT y = 0; y < height; ++y) {
+            const std::size_t row = static_cast<std::size_t>(y) * width;
+            for (UINT x = 0; x < width; ++x) {
+                // Nearly transparent pixels are walls/void. The threshold is
+                // low on purpose: lower-floor radars are drawn semi-faded, so a
+                // high cutoff would turn their walkable floor into walls.
+                solid[row + x] =
+                    pixels[(row + x) * 4 + 3] < 16 ? 1 : 0;
+            }
+        }
     }
 
     bool isWalkableMask(
@@ -505,6 +532,66 @@ namespace
             ++step;
         }
     }
+
+    // True when the full-resolution segment does not touch any solid pixel.
+    // The first/last few world units are ignored so a player whose capsule
+    // overlaps a wall edge can still see past it.
+    bool solidLineClear(
+        const LoadedMap& map,
+        const std::vector<std::uint8_t>& solid,
+        const UINT width,
+        const UINT height,
+        const float startX,
+        const float startY,
+        const float goalX,
+        const float goalY)
+    {
+        if (solid.empty() || width == 0 || height == 0) {
+            return false;
+        }
+
+        const float startPixelX = (startX - map.originX) / map.scale;
+        const float startPixelY = (map.originY - startY) / map.scale;
+        const float goalPixelX = (goalX - map.originX) / map.scale;
+        const float goalPixelY = (map.originY - goalY) / map.scale;
+        const float deltaX = goalPixelX - startPixelX;
+        const float deltaY = goalPixelY - startPixelY;
+        const float length = std::sqrt(deltaX * deltaX + deltaY * deltaY);
+        if (length < 0.5f) {
+            return true;
+        }
+
+        const float marginPixels = std::max(1.0f, 12.0f / map.scale);
+        if (length <= marginPixels * 2.0f) {
+            return true;
+        }
+
+        // Walk the segment at sub-pixel steps so no one-pixel wall is skipped.
+        const int steps = static_cast<int>(
+            std::ceil(length / 0.35f));
+        for (int index = 1; index < steps; ++index) {
+            const float t = static_cast<float>(index) /
+                static_cast<float>(steps);
+            const float along = t * length;
+            if (along <= marginPixels ||
+                along >= length - marginPixels) {
+                continue;
+            }
+            const float pixelX = startPixelX + deltaX * t;
+            const float pixelY = startPixelY + deltaY * t;
+            const int x = static_cast<int>(std::floor(pixelX));
+            const int y = static_cast<int>(std::floor(pixelY));
+            if (x < 0 || y < 0 ||
+                x >= static_cast<int>(width) ||
+                y >= static_cast<int>(height)) {
+                return false;
+            }
+            if (solid[static_cast<std::size_t>(y) * width + x]) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 namespace navigation
@@ -549,6 +636,7 @@ namespace navigation
             width,
             height,
             g_map.walkable);
+        buildSolid(pixels, width, height, g_map.solid);
         g_map.walkableCount = 0;
         for (const std::uint8_t cell : g_map.walkable) {
             g_map.walkableCount += cell ? 1 : 0;
@@ -573,6 +661,13 @@ namespace navigation
                     g_map.walkableLower)) {
                 g_map.hasLower = true;
                 g_map.lowerZ = definition->lowerZ;
+                g_map.lowerWidth = lowerWidth;
+                g_map.lowerHeight = lowerHeight;
+                buildSolid(
+                    lowerPixels,
+                    lowerWidth,
+                    lowerHeight,
+                    g_map.solidLower);
             }
         }
         return g_map.ready;
@@ -614,6 +709,71 @@ namespace navigation
         if (!prepare(mapId) || !g_map.ready) {
             return true;
         }
+
+        // Preferred path: exact, full-resolution obstacle test. This rejects
+        // one-pixel walls that the 512-cell navigation grid can lose.
+        if (!g_map.solid.empty()) {
+            const bool lowerSolid = g_map.hasLower &&
+                !g_map.solidLower.empty();
+            if (!g_map.hasLower || !lowerSolid) {
+                return solidLineClear(
+                    g_map,
+                    g_map.solid,
+                    g_map.sourceWidth,
+                    g_map.sourceHeight,
+                    startX,
+                    startY,
+                    goalX,
+                    goalY);
+            }
+
+            const bool startLower = startZ < g_map.lowerZ;
+            const bool goalLower = goalZ < g_map.lowerZ;
+            if (startLower == goalLower) {
+                return startLower
+                    ? solidLineClear(
+                        g_map,
+                        g_map.solidLower,
+                        g_map.lowerWidth,
+                        g_map.lowerHeight,
+                        startX,
+                        startY,
+                        goalX,
+                        goalY)
+                    : solidLineClear(
+                        g_map,
+                        g_map.solid,
+                        g_map.sourceWidth,
+                        g_map.sourceHeight,
+                        startX,
+                        startY,
+                        goalX,
+                        goalY);
+            }
+
+            // Different floors: stairs and ramps may still connect them, so a
+            // clear segment on either level's mask counts.
+            return solidLineClear(
+                    g_map,
+                    g_map.solid,
+                    g_map.sourceWidth,
+                    g_map.sourceHeight,
+                    startX,
+                    startY,
+                    goalX,
+                    goalY) ||
+                solidLineClear(
+                    g_map,
+                    g_map.solidLower,
+                    g_map.lowerWidth,
+                    g_map.lowerHeight,
+                    startX,
+                    startY,
+                    goalX,
+                    goalY);
+        }
+
+        // Fallback for images that could not be decoded at source resolution.
         if (!g_map.hasLower) {
             return maskLineOfSight(
                 g_map,
@@ -636,8 +796,6 @@ namespace navigation
                 goalY);
         }
 
-        // Endpoints on different floors: stairs and ramps may still connect
-        // them, so accept a clear segment on either level's mask.
         return maskLineOfSight(
                 g_map,
                 g_map.walkable,

@@ -1,6 +1,8 @@
 #include "esp.hpp"
 #include "menu.hpp"
+#include "navigation.hpp"
 #include "utils/weapon_names.hpp"
+#include "core/diagnostics.hpp"
 #include "core/memory/game_layout.hpp"
 #include "core/game/radar_player_sample.hpp"
 #include "core/renderer/viewport_math.hpp"
@@ -26,6 +28,18 @@ namespace
             std::abs(value.x) < 10000000.0f &&
             std::abs(value.y) < 10000000.0f &&
             std::abs(value.z) < 10000000.0f;
+    }
+
+    bool debugVisibilityEnabled()
+    {
+        static const bool enabled = [] {
+            wchar_t value[8]{};
+            return GetEnvironmentVariableW(
+                L"DM_BOT_DEBUG_VIS",
+                value,
+                static_cast<DWORD>(sizeof(value) / sizeof(value[0]))) > 0;
+        }();
+        return enabled;
     }
 
     game::WorldPosition toWorldPosition(const vec3& value)
@@ -565,6 +579,11 @@ void esp::refreshEntityCache(const menu::RuntimeConfig& config)
         if (!validTeam(team)) continue;
         // Skip dead pawns and the local player. Teammates are included when the
         // opponent-free deathmatch behavior (targetAllTeams) is requested.
+        if (entity == localPlayerPawn) {
+            esp::localEntityIndex.store(
+                pawnIndex,
+                std::memory_order_relaxed);
+        }
         if (!config.radarSnapshotEnabled() &&
             (!pawnAlive || entity == localPlayerPawn ||
              (!config.targetAllTeams && team == myTeam))) {
@@ -1166,6 +1185,8 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         localPlayer.viewAngle = { localEyeAngles.x, localEyeAngles.y };
         localPlayer.crosshairEntityIndex = crosshairEntityIndex;
         localPlayer.team = localTeam;
+        localPlayer.entityIndex = esp::localEntityIndex.load(
+            std::memory_order_relaxed);
         localPlayer.isValid = true;
         player_position = eyePos;
         player_yaw = localEyeAngles.y;
@@ -1533,12 +1554,20 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
                  config.smartAimEnabled));
         bool isSpotted = false;
         bool visibilityKnown = false;
+        uint32_t spottedByMask[2]{};
+        bool spottedByMaskKnown = false;
         if (needsSpottedState) {
             uintptr_t entitySpottedState = entity + cs2_dumper::schemas::client_dll::C_CSPlayerPawn::m_entitySpottedState;
             visibilityKnown = memory::TryRead(
                 entitySpottedState +
                     game_layout::spottedFlagOffset(),
                 isSpotted);
+            spottedByMaskKnown = memory::ReadRaw(
+                entitySpottedState +
+                    cs2_dumper::schemas::client_dll::
+                        EntitySpottedState_t::m_bSpottedByMask,
+                spottedByMask,
+                sizeof(spottedByMask));
         }
 
         EnemyInfo enemy;
@@ -1556,6 +1585,10 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         enemy.isFlashed = cp.isFlashed;
         enemy.isSpotted = isSpotted;
         enemy.visibilityKnown = visibilityKnown;
+        enemy.spottedByMaskKnown = spottedByMaskKnown;
+        enemy.spottedByMask[0] = spottedByMask[0];
+        enemy.spottedByMask[1] = spottedByMask[1];
+        enemy.isDormant = dormantKnown && dormant;
         enemy.hasBones = false;
 
         // Real bones are also the source of aimbot target positions. They are
@@ -1625,6 +1658,76 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
                 iterator = radarPlayerLastKnownSamples.erase(iterator);
             } else {
                 ++iterator;
+            }
+        }
+    }
+
+    const bool debugNavMissing =
+        menu::botEnabled.load(std::memory_order_relaxed) &&
+        !navigation::isAvailable(cachedMapState.id);
+    if (debugVisibilityEnabled() || debugNavMissing) {
+        static uint64_t lastVisibilityLogMs = 0;
+        const uint64_t interval = debugVisibilityEnabled() ? 2000 : 15000;
+        if (updateNowMs - lastVisibilityLogMs >= interval) {
+            lastVisibilityLogMs = updateNowMs;
+            const std::string& debugMapId = cachedMapState.id;
+            const uint32_t debugLocalIndex =
+                esp::localEntityIndex.load(std::memory_order_relaxed);
+            wchar_t line[512]{};
+            swprintf_s(
+                line,
+                L"[vis] map='%S' nav=%d local=%u eye=(%.0f,%.0f,%.0f) enemies=%zu",
+                debugMapId.c_str(),
+                navigation::isAvailable(debugMapId) ? 1 : 0,
+                static_cast<unsigned>(debugLocalIndex),
+                eyePos.x,
+                eyePos.y,
+                eyePos.z,
+                buffer.size());
+            diagnostics::log(line);
+
+            std::size_t logged = 0;
+            for (const EnemyInfo& enemy : buffer) {
+                if (logged++ >= 6) {
+                    break;
+                }
+                const vec3 head = enemy.hasBones
+                    ? enemy.bonePositions[BoneIndex::HEAD]
+                    : enemy.headPosition;
+                const bool headLos = navigation::hasLineOfSight3D(
+                    debugMapId,
+                    eyePos.x,
+                    eyePos.y,
+                    eyePos.z,
+                    head.x,
+                    head.y,
+                    head.z);
+                const bool feetLos = navigation::hasLineOfSight3D(
+                    debugMapId,
+                    eyePos.x,
+                    eyePos.y,
+                    eyePos.z,
+                    enemy.position.x,
+                    enemy.position.y,
+                    enemy.position.z);
+                const uint32_t bit = debugLocalIndex == 0
+                    ? 0
+                    : static_cast<uint32_t>(debugLocalIndex - 1);
+                const bool localSpotted = enemy.spottedByMaskKnown &&
+                    (((enemy.spottedByMask[bit / 32] >> (bit % 32)) & 1u) != 0);
+                swprintf_s(
+                    line,
+                    L"[vis] e%u d=%.0f dormant=%d spotted=%d mask=%08X,%08X local=%d head=%d feet=%d",
+                    static_cast<unsigned>(enemy.entityIndex),
+                    enemy.distance,
+                    enemy.isDormant ? 1 : 0,
+                    enemy.isSpotted ? 1 : 0,
+                    enemy.spottedByMask[0],
+                    enemy.spottedByMask[1],
+                    localSpotted ? 1 : 0,
+                    headLos ? 1 : 0,
+                    feetLos ? 1 : 0);
+                diagnostics::log(line);
             }
         }
     }

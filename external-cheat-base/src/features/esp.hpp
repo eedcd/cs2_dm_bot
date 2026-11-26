@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <optional>
 #include <vector>
 
@@ -67,6 +68,12 @@ struct EnemyInfo
     bool isFlashed = false;
     bool isSpotted = false;
     bool visibilityKnown = false;
+    // Per-observer spotted bitmask from EntitySpottedState_t. The bit for the
+    // local player is set by the game only when that player has a real,
+    // server-side line of sight to this pawn.
+    uint32_t spottedByMask[2]{};
+    bool spottedByMaskKnown = false;
+    bool isDormant = false;
     vec3 bonePositions[BoneIndex::BONE_COUNT]{};
     bool hasBones = false;
 };
@@ -80,6 +87,7 @@ struct LocalPlayerCache
     vec2 viewAngle{};             // Current view angles (pitch, yaw)
     int32_t crosshairEntityIndex = -1;
     uint8_t team = 0;
+    uint32_t entityIndex = 0;     // 1-based network index used by spotted masks
     bool isValid = false;         // Is cache valid this frame
 };
 
@@ -170,6 +178,10 @@ namespace esp
 
     // Cached local player data - updated once per frame
     inline LocalPlayerCache localPlayer;
+
+    // 1-based entity index of the local pawn, sampled during cache refresh.
+    // Used to test the local player's own bit in m_bSpottedByMask.
+    inline std::atomic<uint32_t> localEntityIndex{0};
 
     // Bomb state
     inline BombInfo bombInfo;

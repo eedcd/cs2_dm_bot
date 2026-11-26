@@ -54,18 +54,50 @@ namespace
         return mapId;
     }
 
-    // Real visibility test. Up to three body points (head, chest, feet) are
-    // sampled against the map's level-aware walkable mask. This keeps a target
-    // visible when only its upper body peeks over cover, while walls still
-    // block every sample. Falls back to the game's spotted flag only when no
-    // map data is bundled for the current map.
+    // The game's EntitySpottedState_t stores one bit per observer. The bit for
+    // the local player is only set when the server-side visibility trace from
+    // this player's eyes reached the pawn, so it is a trustworthy positive
+    // signal even when a 2D radar mask cannot describe the geometry (props,
+    // multi-floor ledges, or thin walls at source resolution).
+    bool isLocallySpotted(const EnemyInfo& enemy)
+    {
+        if (!enemy.spottedByMaskKnown) {
+            return false;
+        }
+        const uint32_t localIndex = esp::localEntityIndex.load(
+            std::memory_order_relaxed);
+        if (localIndex == 0 || localIndex > 64) {
+            return false;
+        }
+        const uint32_t bit = localIndex - 1;
+        return ((enemy.spottedByMask[bit / 32] >> (bit % 32)) & 1u) != 0;
+    }
+
+    // Real visibility test. Dormant pawns are outside the PVS and can never be
+    // shot. A pawn spotted by the local player is confirmed visible by the game
+    // itself; otherwise the segment is traced against the map's full-resolution
+    // obstacle mask, sampling head, chest and feet. This keeps a target visible
+    // when only its upper body peeks over cover while walls still block every
+    // sample. No global "spotted" fallback is used because that flag is
+    // team-shared and persists briefly, which caused through-wall locking.
     bool hasClearLineOfSight(
         const std::string& mapId,
         const vec3& eyePosition,
         const EnemyInfo& enemy)
     {
+        if (enemy.isDormant) {
+            return false;
+        }
+        if (isLocallySpotted(enemy)) {
+            return true;
+        }
         if (!navigation::isAvailable(mapId)) {
-            return enemy.visibilityKnown && enemy.isSpotted;
+            // Workshop maps do not ship radar/overview data, so there is no
+            // geometry to trace. Fall back to the game's spotted state, but
+            // keep it short-range so the bot cannot snap onto enemies through
+            // walls across the map.
+            return enemy.visibilityKnown && enemy.isSpotted &&
+                enemy.distance <= 1200.0f;
         }
 
         std::array<vec3, 3> samples{};
