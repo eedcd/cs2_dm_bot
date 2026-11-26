@@ -1347,6 +1347,7 @@ void sdl_renderer::pollEvents()
 {
     static AsyncKeyTracker exitKeyTracker{};
     static AsyncKeyTracker menuKeyTracker{};
+    static AsyncKeyTracker espOnlyKeyTracker{};
 
     bool rendererResetRequested = false;
     SDL_Event event;
@@ -1375,6 +1376,7 @@ void sdl_renderer::pollEvents()
         menu::suppressHotkeysUntilRelease) {
         exitKeyTracker = {};
         menuKeyTracker = {};
+        espOnlyKeyTracker = {};
         if (!menu::isBindingKey &&
             menu::ConfiguredHotkeysReleased()) {
             menu::suppressHotkeysUntilRelease = false;
@@ -1394,6 +1396,8 @@ void sdl_renderer::pollEvents()
         consumeAsyncKeyPress(menu::exitKey, exitKeyTracker);
     const bool menuPressed =
         consumeAsyncKeyPress(menu::menuToggleKey, menuKeyTracker);
+    const bool espOnlyPressed = gameHwnd &&
+        consumeAsyncKeyPress('K', espOnlyKeyTracker);
 
     // Check exit key (configurable, default: F9).
     if (gameOrOverlayForeground && exitPressed) {
@@ -1401,9 +1405,19 @@ void sdl_renderer::pollEvents()
         return;
     }
 
+    // K cycles ESP-only mode (all players -> enemies only -> off), but only
+    // while DM Bot is disabled. While a stage is active the badge is hidden
+    // and F4 is ignored.
+    if (gameOrOverlayForeground && espOnlyPressed) {
+        if (!menu::botEnabled.load(std::memory_order_relaxed)) {
+            menu::cycleEspOnlyStage();
+        }
+    }
+
     // F4 toggles DM Bot between disabled and enabled. The overlay stays
     // click-through; there is no interactive menu anymore.
-    if (gameOrOverlayForeground && menuPressed) {
+    if (gameOrOverlayForeground && menuPressed &&
+        menu::espOnlyStage.load(std::memory_order_relaxed) == 0) {
         menu::toggleBot();
         inputAllowed.store(
             isGameClientForeground(), std::memory_order_relaxed);

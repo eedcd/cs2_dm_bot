@@ -73,6 +73,9 @@ namespace menu
     inline std::mutex configMutex;
     inline RuntimeConfig runtimeConfig{};
     inline std::atomic<bool> botEnabled{false};
+    // ESP-only cycle toggled with K while DM Bot is disabled:
+    // 0 = off, 1 = ESP for all players, 2 = ESP for enemies only.
+    inline std::atomic<int> espOnlyStage{0};
 
     // ESP presentation globals consumed by esp::render().
     inline bool espEnabled = true;
@@ -154,11 +157,50 @@ namespace menu
             runtimeConfig = config;
         }
         botEnabled.store(enabled, std::memory_order_relaxed);
+        if (enabled) {
+            espOnlyStage.store(0, std::memory_order_relaxed);
+        }
     }
 
     inline void toggleBot()
     {
         setBotEnabled(!botEnabled.load(std::memory_order_relaxed));
+    }
+
+    // K cycles ESP-only mode while DM Bot is disabled:
+    // off -> all-player ESP -> enemy-only ESP -> off.
+    // ESP-only keeps the visual overlay on but leaves aimbot, triggerbot and
+    // autowalk off.
+    inline void setEspOnlyStage(int stage)
+    {
+        if (stage <= 0) {
+            espOnlyStage.store(0, std::memory_order_relaxed);
+            setBotEnabled(false);
+            return;
+        }
+
+        RuntimeConfig config;
+        config.espEnabled = true;
+        config.espBox = true;
+        config.espHealth = true;
+        config.espDistance = true;
+        config.espWeapon = true;
+        config.espSkeleton = true;
+        config.espViewAngle = true;
+        config.espWallCheck = true;
+        config.targetAllTeams = stage == 1;
+        {
+            std::lock_guard<std::mutex> lock(configMutex);
+            runtimeConfig = config;
+        }
+        botEnabled.store(false, std::memory_order_relaxed);
+        espOnlyStage.store(stage, std::memory_order_relaxed);
+    }
+
+    inline void cycleEspOnlyStage()
+    {
+        setEspOnlyStage(
+            (espOnlyStage.load(std::memory_order_relaxed) + 1) % 3);
     }
 
     inline RuntimeConfig getRuntimeConfig()

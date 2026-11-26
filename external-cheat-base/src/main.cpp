@@ -78,6 +78,10 @@ namespace
     // shows whether it is currently enabled.
     void renderStatusBadge(bool cs2Found)
     {
+        // ESP-only stages are intentionally stealthy: no badge at all.
+        if (menu::espOnlyStage.load(std::memory_order_relaxed) != 0) {
+            return;
+        }
         if (WIDTH == 0 || HEIGHT == 0) {
             return;
         }
@@ -302,7 +306,9 @@ int main(int argc, char* argv[])
 
             const bool enabled =
                 menu::botEnabled.load(std::memory_order_relaxed);
-            if (enabled) {
+            const bool espOnly =
+                menu::espOnlyStage.load(std::memory_order_relaxed) != 0;
+            if (enabled || espOnly) {
                 esp::render();
             }
             renderStatusBadge(true);
