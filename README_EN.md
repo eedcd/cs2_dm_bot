@@ -1,12 +1,12 @@
-# CS2 External ESP
+# CS2 DM Bot
 
-[![Build](https://github.com/tiansongyu/cs2_cheat/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/tiansongyu/cs2_cheat/actions/workflows/build.yaml)
-[![Offsets](https://github.com/tiansongyu/cs2_cheat/actions/workflows/update-files.yml/badge.svg?branch=main)](https://github.com/tiansongyu/cs2_cheat/actions/workflows/update-files.yml)
-[![License](https://img.shields.io/github/license/tiansongyu/cs2_cheat)](LICENSE)
+[![Build](https://github.com/eedcd/cs2_dm_bot/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/eedcd/cs2_dm_bot/actions/workflows/build.yaml)
+[![Offsets](https://github.com/eedcd/cs2_dm_bot/actions/workflows/update-files.yml/badge.svg?branch=main)](https://github.com/eedcd/cs2_dm_bot/actions/workflows/update-files.yml)
+[![License](https://img.shields.io/github/license/eedcd/cs2_dm_bot)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 ![C++](https://img.shields.io/badge/C%2B%2B-20-00599C)
 
-An educational CS2 external ESP project built with SDL2, Dear ImGui, and C++20. It includes an in-game overlay, a fixed-map Radar, and an optional public sharing service.
+An external CS2 deathmatch bot built with SDL2, Dear ImGui, and C++20. There is no interactive menu: only a top-right status badge. When enabled, it runs ESP, aimbot, triggerbot, and map-aware movement automatically.
 
 [中文](README.md) | **English**
 
@@ -28,38 +28,36 @@ An educational CS2 external ESP project built with SDL2, Dear ImGui, and C++20. 
 
 | Component | Capabilities |
 | --- | --- |
-| ESP | Boxes, skeletons, health, weapons, distance, snaplines, spotted state, grenades, and dropped weapons |
-| Assistance | Aim assistance with FOV and smoothing, triggerbot, bomb timer; Anti-Flash requires explicit memory-write permission |
-| Radar | Fixed north-up maps, player position and direction, floor and confidence state, team panels, equipment, and C4 state |
-| Sharing and replay | Local Web Radar, trusted-LAN access, public Relay, sanitized NDJSON recording, and browser playback |
-| Performance and diagnostics | Adaptive 4/10/20 Hz Radar sampling, slow-client backpressure, timing, RPM, P95/P99, and deadline metrics |
-
-![Application screenshot](img/hack.png)
+| Status badge | Always-on-top in the top-right corner; yellow `DM Bot waiting for CS2 process` without CS2, blue `DM Bot disable` / `DM Bot enable` once attached |
+| ESP | Boxes, skeletons, health, distance, weapon, view angle, visibility; **all teams**, every CT / T except yourself |
+| Aimbot | Active while enabled; 360-degree search, nearest angle first, only real visible targets (layered map line-of-sight, no wall locking) |
+| Triggerbot | Active while enabled; fires 100–300 ms after locking a target |
+| Movement | A\* pathfinding over radar walkable masks, prefers the nearest living player, patrols otherwise, detours around walls, counter-strafes before firing |
+| Map data | 16 common maps plus 4 layered lower floors (Nuke / Train / Vertigo / Baggage) |
 
 ## Requirements
 
 - Windows 10 or Windows 11 (x64)
-- Visual Studio 2022 with the Desktop development with C++ workload
-- Node.js 22.12 or newer when building Web Radar
+- Visual Studio 2022 (or newer) with the Desktop development with C++ workload
 - CS2 launched with `-insecure` in Windowed Fullscreen mode
 
 The overlay supports a game window located entirely on one monitor. Rendering pauses while the window spans monitors and resumes when it moves back. Exclusive fullscreen is unsupported. The application requests administrator privileges at startup and reconnects automatically after CS2 restarts.
 
 ## Quick Start
 
-1. Download and extract the latest package from [Releases](https://github.com/tiansongyu/cs2_cheat/releases/latest).
-2. Launch CS2 with `-insecure` and enter an offline game.
-3. Run `external-cheat-base.exe` and accept the Windows administrator prompt.
-4. Press `F4` to show or hide the settings menu. Press `F9` to exit.
+1. Download and extract the latest package from [Releases](https://github.com/eedcd/cs2_dm_bot/releases/latest).
+2. Make sure the `maps\` folder sits next to `external-cheat-base.exe` (included in the archive).
+3. Launch CS2 with `-insecure` and enter an offline match.
+4. Run `external-cheat-base.exe` and accept the Windows administrator prompt.
 
-| Key | Default action |
+| Key | Action |
 | --- | --- |
-| `F4` | Show or hide the menu |
+| `F4` | Toggle between `DM Bot disable` and `DM Bot enable` |
 | `F9` | Exit the application |
-| `Shift` | Aim assistance when enabled |
-| `F` | Triggerbot when enabled |
 
-Web Radar and the memory-writing Anti-Flash option are disabled by default. Enable memory writes only for explicit offline testing:
+While enabled (`DM Bot enable`), ESP, aimbot, triggerbot, and automatic movement run immediately. While disabled, every feature stops and movement keys are released.
+
+The memory-writing Anti-Flash option is disabled by default. Enable memory writes only for explicit offline testing:
 
 ```powershell
 .\external-cheat-base.exe --allow-memory-writes
@@ -67,83 +65,62 @@ Web Radar and the memory-writing Anti-Flash option are disabled by default. Enab
 
 Runtime logs are written to `%TEMP%\cs2-esp.log`.
 
-## Radar
+## Navigation and Line of Sight
 
-### Local and browser modes
+- Radar images (`assets/maps/*.png`) only paint walkable floor, so they are used directly as a navigation grid:
+  - 512×512 grid, one-cell erosion for wall clearance, 8-direction A\*, line-of-sight path smoothing.
+  - The current map name is read from `dwGlobalVars`; its `originX / originY / scale` converts world coordinates to pixels and back.
+  - Paths are recomputed every 600 ms or when the goal moves more than 250 units; movement stops within 150 units of the target.
+- Layered maps select the upper or lower mask by Z threshold; when the endpoints are on different floors, both masks are checked so stairs and ramps still count as visible.
+- Wall detection casts one ray each to the head, chest, and feet, and treats the target as visible if any point is clear.
+- An external process cannot call the game's `TraceShape`, so visibility is approximated from radar walkable masks; VPK 3D collision geometry is not parsed.
 
-1. Press `F4` and open **World & Radar**.
-2. Enable **Local map overlay** to display the fixed full map in the game overlay.
-3. For a browser view, enable **Web Radar** and open the token-bearing URL shown in the menu. The default address is `127.0.0.1:22006`.
-4. For access from a trusted LAN, enable LAN binding, replace `127.0.0.1` with the PC's private IPv4 address, and keep the full token in the URL.
-
-Player names, Steam IDs, and team information can be filtered before transmission. Sampling runs at 4 Hz with no viewers, 10 Hz for background sharing, and 20 Hz with active viewers. When **Record sanitized Radar snapshots** is enabled, sanitized recordings are written to `%LOCALAPPDATA%\AegisCS2\recordings`; load a `.ndjson` file in Web Radar for playback and seeking.
-
-The local service uses HTTP/WS, so its token does not encrypt transport. Do not port-forward it, expose it through a public tunnel, or share it over an untrusted network. See the [Web Radar design](docs/web-radar-design.md) for architecture and security details.
-
-### Public sharing
-
-The public Relay shares Radar data through an outbound `wss://` connection from the application, without exposing an inbound port on the gaming PC. It provides separate Producer and Viewer credentials, room isolation, rate limiting, and bounded latest-frame broadcasting.
-
-Deployment and design references:
-
-- [Public Relay deployment guide](deploy/public-relay/README.md)
-- [Public Relay design](docs/public-radar-relay-design.md)
-- [Public Radar architecture](docs/public-radar-relay-architecture.html)
+Maps outside the bundled list fall back to "chase the nearest player + detour around walls".
 
 ## Building
 
-### Visual Studio 2022
+### Visual Studio
 
 ```powershell
-git clone https://github.com/tiansongyu/cs2_cheat.git
-cd cs2_cheat\web-radar
-npm ci
-npm test
-npm run build
-cd ..
+git clone https://github.com/eedcd/cs2_dm_bot.git
 ```
 
-Open `external-cheat-base.sln` in Visual Studio 2022, select `Release | x64`, and build. MSBuild copies an existing `web-radar/dist` directory into the binary output. Keep the complete `web-radar/dist` directory when distributing the application.
+Open `external-cheat-base.sln` in Visual Studio, select `Release | x64`, and build. The post-build step copies `SDL2.dll` and `assets/maps` into the output directory.
 
-### Reproducible Docker build
+Command line:
 
-```bash
-docker build --target artifacts -t cs2-cheat-build .
+```powershell
+msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-This runs the frontend, C++, and Go tests before cross-compiling the Windows application. Build the production public Relay image separately:
-
-```bash
-docker build -f radar-relay/Dockerfile -t cs2-radar-relay:local .
-```
-
-To synchronize the pinned, SHA-256-verified map assets manually:
-
-```bash
-python3 scripts/sync_web_radar_maps.py
-```
+The result is in `x64\Release\`; the `maps\` folder must stay next to the executable.
 
 ## Project Structure
 
 | Path | Purpose |
 | --- | --- |
-| `external-cheat-base/` | Windows C++ application, overlay, and embedded Radar service |
-| `web-radar/` | Browser Radar frontend and map assets |
-| `radar-relay/` | Go public Relay service |
-| `deploy/public-relay/` | Caddy, Docker Compose, and production deployment tools |
-| `tests/` | C++ regression tests |
-| `docs/` | Technical, architecture, and security documentation |
+| `external-cheat-base/` | Windows C++ application, overlay, ESP, aimbot, triggerbot, and movement |
+| `assets/maps/` | Radar masks (16 maps + 4 lower floors), copied to the output at build time |
+| `tests/` | C++ regression tests (viewport math, sampling timing) |
+| `docs/` | Reverse-engineering and rendering documentation |
+| `.github/workflows/` | Build, release, and automatic offset updates |
+
+Key modules:
+
+- `src/features/esp.cpp`: entity reading and ESP rendering
+- `src/features/aimbot.cpp`: aimbot, triggerbot, and visibility checks
+- `src/features/movement.cpp`: automatic movement, quick stop, and wall detours
+- `src/features/navigation.cpp`: radar mask decoding, A\* pathfinding, layered line-of-sight
+- `src/main.cpp`: status badge, F4/F9, and the data/render loops
 
 ## CI and Offset Updates
 
-The **Build** badge at the top is generated dynamically by GitHub Actions. Green means the latest `main` build passed; red means a build or test failed. CI runs the C++ regression suite, Web Radar tests and build, Go tests and vulnerability checks, Relay image builds, and the Windows `Release | x64` build.
-
-The **Offsets** workflow checks `cs2-dumper` hourly. It fetches generated headers at an exact commit SHA, validates and commits them, and then triggers the complete build.
+- The **Build** badge is generated by GitHub Actions: green means the latest `main` build passed.
+- CI runs C++ regression tests on Ubuntu, then compiles `Release | x64` on Windows, verifies the release layout, and publishes a release.
+- The **Offsets** workflow checks [cs2-dumper](https://github.com/a2x/cs2-dumper) hourly. It fetches and validates headers at an exact commit SHA, commits them as `build: update CS2 offsets to <sha>`, and then triggers the full build.
 
 ## License and Third-Party Assets
 
 Project code is released under the [MIT License](LICENSE).
 
-Radar images and overview coordinates are Valve property and remain subject to Valve's copyright and terms. Every distribution must retain `web-radar/dist/maps/NOTICE.txt` and `SOURCE.json`. Web Radar is a clean-room reimplementation and contains no GPL-3.0 source from `cs2_webradar`.
-
-Primary dependencies and data sources: [cs2-dumper](https://github.com/a2x/cs2-dumper), [SDL](https://github.com/libsdl-org/SDL), [Dear ImGui](https://github.com/ocornut/imgui), [CivetWeb](https://github.com/civetweb/civetweb), [Caddy](https://caddyserver.com/), [gorilla/websocket](https://github.com/gorilla/websocket), and [awpy-data](https://github.com/pnxenopoulos/awpy-data).
+Radar images and overview coordinates are Valve property and remain subject to Valve's copyright and terms. Primary dependencies and data sources: [cs2-dumper](https://github.com/a2x/cs2-dumper), [SDL](https://github.com/libsdl-org/SDL), [Dear ImGui](https://github.com/ocornut/imgui), and [awpy-data](https://github.com/pnxenopoulos/awpy-data).

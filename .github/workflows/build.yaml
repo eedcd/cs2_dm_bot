@@ -104,9 +104,16 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        $tag = "v2.0.${{ github.run_number }}.${{ github.run_attempt }}"
+        $sha = "${{ inputs.source_sha || github.sha }}"
+        $shortSha = $sha.Substring(0, 7)
+        $date = Get-Date -Format 'yyyy.MM.dd'
+        $tag = "dm-bot-$date-$shortSha"
+        # Avoid a hard failure when the same commit is rebuilt on the same day.
+        if (gh release view $tag 2>$null) {
+          $tag = "$tag-${{ github.run_attempt }}-${{ github.run_number }}"
+        }
         gh release create $tag `
           "x64/Release/Release-Binaries.zip#Release-Binaries.zip" `
           --target "${{ inputs.source_sha || github.sha }}" `
-          --title "Release $tag (DM Bot)" `
+          --title "DM Bot $date ($shortSha)" `
           --generate-notes
