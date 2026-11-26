@@ -74,7 +74,17 @@ jobs:
       if: steps.revision.outputs.download == 'true'
       run: |
         set -euo pipefail
-        docker build --target artifacts .
+        for file in client_dll.hpp offsets.hpp buttons.hpp; do
+          path="external-cheat-base/generated/${file}"
+          if [ ! -s "$path" ]; then
+            echo "Generated header is missing or empty: $path" >&2
+            exit 1
+          fi
+          if ! grep -q "cs2_dumper" "$path"; then
+            echo "Generated header does not look valid: $path" >&2
+            exit 1
+          fi
+        done
 
     - name: Commit and push changes
       id: publish
@@ -89,7 +99,7 @@ jobs:
           exit 0
         fi
 
-        git commit -m "Update CS2 offsets to ${REVISION:0:12}"
+        git commit -m "build: update CS2 offsets to ${REVISION:0:12}"
         for attempt in 1 2 3; do
           git pull --rebase origin main
           if git push origin HEAD:main; then

@@ -1401,33 +1401,12 @@ void sdl_renderer::pollEvents()
         return;
     }
 
-    // The low-order GetAsyncKeyState bit records a short press that happened
-    // between frames. This keeps F4 responsive even if a frame is delayed.
-    if (gameOrOverlayForeground && gameHwnd && menuPressed) {
-        menuVisible = !menuVisible;
-        if (!setClickThrough(overlayHwnd, !menuVisible)) {
-            menuVisible = !menuVisible;
-            inputAllowed.store(false, std::memory_order_relaxed);
-            diagnostics::log(
-                L"Unable to change overlay click-through state; "
-                L"the previous menu state was restored.");
-            return;
-        }
-
-        // Clicking the menu can activate the overlay HWND. When hiding it,
-        // return focus to CS2 when Windows permits that transition. Injection
-        // stays blocked unless the game client itself is confirmed foreground.
-        if (!menuVisible &&
-            GetForegroundWindow() == overlayHwnd &&
-            IsWindow(gameHwnd)) {
-            SetForegroundWindow(gameHwnd);
-        }
+    // F4 toggles DM Bot between disabled and enabled. The overlay stays
+    // click-through; there is no interactive menu anymore.
+    if (gameOrOverlayForeground && menuPressed) {
+        menu::toggleBot();
         inputAllowed.store(
-            !menuVisible &&
-                isGameClientForeground() &&
-                !menu::isBindingKey &&
-                !menu::suppressHotkeysUntilRelease,
-            std::memory_order_relaxed);
+            isGameClientForeground(), std::memory_order_relaxed);
     }
 }
 

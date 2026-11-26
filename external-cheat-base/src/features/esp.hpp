@@ -175,6 +175,7 @@ namespace esp
     inline BombInfo bombInfo;
 
     bool init();
+    std::string currentMapId();
     void updateEntities(const menu::RuntimeConfig& config);
     void refreshEntityCache(const menu::RuntimeConfig& config);
     void render();

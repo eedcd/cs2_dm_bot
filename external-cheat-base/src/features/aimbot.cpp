@@ -5,12 +5,17 @@
 #include "aimbot.hpp"
 #include "esp.hpp"
 #include "menu.hpp"
+#include "navigation.hpp"
 #include <Windows.h>
 #include <iostream>
 #include <cmath>
 #include <limits>
 #include <algorithm>
 #include <chrono>
+#include <random>
+#include <atomic>
+#include <array>
+#include <string>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -23,10 +28,90 @@ namespace
     SteadyClock::time_point lastAimUpdate{};
     SteadyClock::time_point triggerTargetAcquired{};
     SteadyClock::time_point lastTriggerShot{};
+    std::chrono::milliseconds currentTriggerDelay{200};
     float aimResidualX = 0.0f;
     float aimResidualY = 0.0f;
     int32_t currentAimTargetIndex = -1;
     int32_t currentTriggerTargetIndex = -1;
+
+    // Set when the crosshair is close enough to a target (or the triggerbot is
+    // about to shoot) so the movement module can stop the player first.
+    std::atomic<bool> aimEngaging{false};
+    std::atomic<bool> triggerEngaging{false};
+
+    // Map id used for geometric line-of-sight checks. Reading it touches game
+    // memory, so refresh at most once per second.
+    const std::string& currentMapIdCached()
+    {
+        static std::string mapId;
+        static SteadyClock::time_point lastQuery{};
+        const auto now = SteadyClock::now();
+        if (mapId.empty() ||
+            now - lastQuery >= std::chrono::seconds(1)) {
+            lastQuery = now;
+            mapId = esp::currentMapId();
+        }
+        return mapId;
+    }
+
+    // Real visibility test. Up to three body points (head, chest, feet) are
+    // sampled against the map's level-aware walkable mask. This keeps a target
+    // visible when only its upper body peeks over cover, while walls still
+    // block every sample. Falls back to the game's spotted flag only when no
+    // map data is bundled for the current map.
+    bool hasClearLineOfSight(
+        const std::string& mapId,
+        const vec3& eyePosition,
+        const EnemyInfo& enemy)
+    {
+        if (!navigation::isAvailable(mapId)) {
+            return enemy.visibilityKnown && enemy.isSpotted;
+        }
+
+        std::array<vec3, 3> samples{};
+        int sampleCount = 0;
+        if (enemy.hasBones) {
+            samples[sampleCount++] =
+                enemy.bonePositions[BoneIndex::HEAD];
+            samples[sampleCount++] =
+                enemy.bonePositions[BoneIndex::SPINE_2];
+        } else {
+            samples[sampleCount++] = enemy.headPosition;
+        }
+        samples[sampleCount++] = enemy.position;
+
+        for (int index = 0; index < sampleCount; ++index) {
+            const vec3& point = samples[index];
+            if (!std::isfinite(point.x) ||
+                !std::isfinite(point.y) ||
+                !std::isfinite(point.z)) {
+                continue;
+            }
+            if (navigation::hasLineOfSight3D(
+                    mapId,
+                    eyePosition.x,
+                    eyePosition.y,
+                    eyePosition.z,
+                    point.x,
+                    point.y,
+                    point.z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int randomTriggerDelayMilliseconds(
+        const int minimum,
+        const int maximum)
+    {
+        static thread_local std::mt19937 generator{
+            std::random_device{}()};
+        const int low = std::max(0, std::min(minimum, maximum));
+        const int high = std::max(low, std::max(minimum, maximum));
+        std::uniform_int_distribution<int> distribution(low, high);
+        return distribution(generator);
+    }
 
     float timeBasedAlpha(
         SteadyClock::time_point& previous,
@@ -69,12 +154,14 @@ namespace
         aimResidualX = 0.0f;
         aimResidualY = 0.0f;
         currentAimTargetIndex = -1;
+        aimEngaging.store(false, std::memory_order_relaxed);
     }
 
     void resetTriggerState()
     {
         triggerTargetAcquired = {};
         currentTriggerTargetIndex = -1;
+        triggerEngaging.store(false, std::memory_order_relaxed);
     }
 }
 
@@ -230,11 +317,7 @@ void aimbot::update(const menu::RuntimeConfig& config)
         return;
     }
 
-    // Check if aimbot key is held (Shift)
-    if (!(GetAsyncKeyState(config.aimbotKey) & 0x8000)) {
-        resetAimState();
-        return;
-    }
+    // Aimbot runs for as long as DM Bot is enabled; no extra key is required.
 
     // Use cached local player data (updated once per frame in esp::updateEntities)
     if (!esp::localPlayer.isValid) {
@@ -261,18 +344,9 @@ void aimbot::update(const menu::RuntimeConfig& config)
     };
     Candidate best{};
     Candidate retained{};
+    const std::string& mapId = currentMapIdCached();
 
     for (const EnemyInfo& enemy : *enemies) {
-        if (config.smartAimEnabled) {
-            if (!enemy.visibilityKnown || !enemy.isSpotted) {
-                continue;
-            }
-        } else if (
-            config.aimbotVisibleOnly &&
-            (!enemy.visibilityKnown || !enemy.isSpotted)) {
-            continue;
-        }
-
         const vec2 candidateAngle = calcAngle(
             eyePos,
             targetPosition(
@@ -285,6 +359,17 @@ void aimbot::update(const menu::RuntimeConfig& config)
         if (!std::isfinite(fov)) {
             continue;
         }
+        if (!config.smartAimEnabled && fov >= config.aimbotFOV) {
+            continue;
+        }
+
+        // Only engage targets that are actually visible. Using the game's
+        // "spotted" flag here was wrong: it is a radar marker, so enemies
+        // behind walls were locked while visible ones were ignored.
+        if ((config.aimbotVisibleOnly || config.smartAimEnabled) &&
+            !hasClearLineOfSight(mapId, eyePos, enemy)) {
+            continue;
+        }
 
         float metric = fov;
         if (config.smartAimEnabled) {
@@ -292,8 +377,6 @@ void aimbot::update(const menu::RuntimeConfig& config)
                 ? enemy.distance
                 : static_cast<float>(enemy.health) +
                     enemy.distance * 0.001f;
-        } else if (fov >= config.aimbotFOV) {
-            continue;
         }
 
         const Candidate candidate{
@@ -319,14 +402,21 @@ void aimbot::update(const menu::RuntimeConfig& config)
     // This prevents frame-to-frame oscillation between nearly equal players.
     Candidate selected = best;
     if (retained.valid) {
+        // Keep a valid target briefly, but do not stay on a much worse angle.
+        // With a 360-degree search a large hysteresis would keep the aim on a
+        // distant/blocked-looking enemy while a visible one is right ahead.
         const float hysteresis = config.smartAimEnabled
             ? std::max(1.0f, std::abs(best.metric) * 0.10f)
-            : std::max(0.35f, config.aimbotFOV * 0.05f);
+            : 2.0f;
         if (retained.metric <= best.metric + hysteresis) {
             selected = retained;
         }
     }
     currentAimTargetIndex = selected.entityIndex;
+    const float aimError = getFOV(currentViewAngle, selected.angle);
+    aimEngaging.store(
+        std::isfinite(aimError) && aimError <= 6.0f,
+        std::memory_order_relaxed);
 
     // Exponential time-based smoothing is stable across worker rates.
     const float alpha =
@@ -365,6 +455,12 @@ void aimbot::update(const menu::RuntimeConfig& config)
     }
 }
 
+bool aimbot::isEngaging()
+{
+    return aimEngaging.load(std::memory_order_relaxed) ||
+        triggerEngaging.load(std::memory_order_relaxed);
+}
+
 void aimbot::updateTriggerbot(const menu::RuntimeConfig& config)
 {
     if (!config.triggerbotEnabled ||
@@ -374,10 +470,7 @@ void aimbot::updateTriggerbot(const menu::RuntimeConfig& config)
         return;
     }
 
-    if (!(GetAsyncKeyState(config.triggerbotKey) & 0x8000)) {
-        resetTriggerState();
-        return;
-    }
+    // Triggerbot runs for as long as DM Bot is enabled; no extra key is required.
 
     if (!esp::localPlayer.isValid) {
         resetTriggerState();
@@ -411,15 +504,22 @@ void aimbot::updateTriggerbot(const menu::RuntimeConfig& config)
         return;
     }
 
+    // The crosshair is on a target: stop moving while the shot is prepared.
+    triggerEngaging.store(true, std::memory_order_relaxed);
+
     const auto now = SteadyClock::now();
     if (currentTriggerTargetIndex != crosshairEntityIndex) {
         currentTriggerTargetIndex = crosshairEntityIndex;
         triggerTargetAcquired = now;
+        currentTriggerDelay = std::chrono::milliseconds(
+            config.triggerbotRandomDelay
+                ? randomTriggerDelayMilliseconds(
+                    config.triggerbotDelayMin,
+                    config.triggerbotDelayMax)
+                : std::max(0, config.triggerbotDelay));
     }
 
-    const auto acquisitionDelay = std::chrono::milliseconds(
-        std::max(0, config.triggerbotDelay));
-    if (now - triggerTargetAcquired < acquisitionDelay) {
+    if (now - triggerTargetAcquired < currentTriggerDelay) {
         return;
     }
 

@@ -25,6 +25,10 @@ namespace aimbot
     // Update Triggerbot - should be called every frame
     void updateTriggerbot(const menu::RuntimeConfig& config);
 
+    // True while the crosshair is being aligned with a target or the
+    // triggerbot is about to fire. Movement should be stopped so shots land.
+    bool isEngaging();
+
     // Calculate angle to target
     vec2 calcAngle(const vec3& src, const vec3& dst);
 

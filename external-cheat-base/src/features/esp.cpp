@@ -433,6 +433,11 @@ bool esp::init()
     return true;
 }
 
+std::string esp::currentMapId()
+{
+    return sampleMapState().id;
+}
+
 void esp::clearRuntimeState()
 {
     std::lock_guard<std::mutex> lock(dataMutex);
@@ -558,8 +563,11 @@ void esp::refreshEntityCache(const menu::RuntimeConfig& config)
             entity +
                 cs2_dumper::schemas::client_dll::C_BaseEntity::m_iTeamNum);
         if (!validTeam(team)) continue;
+        // Skip dead pawns and the local player. Teammates are included when the
+        // opponent-free deathmatch behavior (targetAllTeams) is requested.
         if (!config.radarSnapshotEnabled() &&
-            (!pawnAlive || entity == localPlayerPawn || team == myTeam)) {
+            (!pawnAlive || entity == localPlayerPawn ||
+             (!config.targetAllTeams && team == myTeam))) {
             continue;
         }
 
@@ -1297,7 +1305,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         if (!captureRadarSnapshot &&
             (!needsHighFrequencyPlayerSamples ||
              cp.isLocal ||
-             cp.team == localTeam ||
+             (cp.team == localTeam && !config.targetAllTeams) ||
              !cp.alive)) {
             continue;
         }
@@ -1499,7 +1507,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
 
         if (!needsHighFrequencyPlayerSamples ||
             !alive ||
-            liveTeam == localTeam ||
+            (liveTeam == localTeam && !config.targetAllTeams) ||
             dormant ||
             !validPosition) {
             continue;
